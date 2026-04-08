@@ -1,15 +1,34 @@
-name: DevSecOps Pipeline
+.name: DevSecOps Pipeline
 
 on:
   push:
   pull_request:
 
 jobs:
-  test:
+  security:
     runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v3
 
-      - name: Test
-        run: echo "Pipeline working"
+      - name: Install deps
+        run: |
+          cd app
+          npm install
+
+      - name: SAST (Semgrep)
+        run: semgrep --config=auto .
+
+      - name: Secret Scan (Gitleaks)
+        run: gitleaks detect
+
+      - name: SCA (Snyk)
+        run: |
+          npm install -g snyk
+          snyk test || true
+
+      - name: Build Docker
+        run: docker build -t myapp .
+
+      - name: Container Scan (Trivy)
+        run: trivy image myapp || true
