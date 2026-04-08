@@ -1,0 +1,21 @@
+name: Security Pipeline
+
+on: [push]
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v3
+
+      - run: npm install
+
+      - name: SAST
+        run: semgrep --config=auto .
+
+      - name: Secret scan
+        run: gitleaks detect
+
+      - name: SCA
+        run: snyk test
