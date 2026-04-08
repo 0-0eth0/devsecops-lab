@@ -31,31 +31,28 @@ jobs:
           cd app
           npm install
 
-      # 🟢 INSTALL TOOLS (FIXED)
+      # 🟢 INSTALL TOOLS
       - name: Install tools
         run: |
           sudo apt-get update
-          sudo apt-get install -y python3-pip wget
+          sudo apt-get install -y python3-pip
           pip3 install semgrep
           npm install -g snyk
 
-          # Trivy
+          # Trivy install (stable)
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
-
-          # Gitleaks (stable install)
-          wget https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks-linux-amd64 -O gitleaks
-          chmod +x gitleaks
-          sudo mv gitleaks /usr/local/bin/
 
       # 🟢 SEMGREP
       - name: Semgrep Scan
         run: |
           semgrep --config=auto --json > semgrep.json || echo "{}" > semgrep.json
 
-      # 🟢 GITLEAKS
+      # 🟢 GITLEAKS (OFFICIAL ACTION ✅)
       - name: Gitleaks Scan
-        run: |
-          gitleaks detect --report-format json --report-path gitleaks.json || echo "[]" > gitleaks.json
+        uses: gitleaks/gitleaks-action@v2
+        with:
+          args: detect --report-format json --report-path gitleaks.json
+        continue-on-error: true
 
       # 🟢 SNYK
       - name: Snyk Scan
@@ -71,7 +68,7 @@ jobs:
           format: cyclonedx-json
           output-file: sbom.json
 
-      # 🟢 BUILD IMAGE (SAFE)
+      # 🟢 BUILD IMAGE
       - name: Build Docker Image
         run: docker build -t myapp .
 
@@ -80,7 +77,7 @@ jobs:
         run: |
           trivy image --format json -o trivy.json myapp || echo "{}" > trivy.json
 
-      # 🔥 BEAUTIFICATION (FIXED + ROBUST)
+      # 🔥 BEAUTIFICATION
       - name: Generate Security Report
         run: |
           cat << 'EOF' > format-report.js
@@ -158,7 +155,7 @@ jobs:
 
           node format-report.js
 
-      # 🟢 COMMIT REPORT (SAFE)
+      # 🟢 COMMIT REPORT
       - name: Commit Report
         run: |
           git config user.name "github-actions"
