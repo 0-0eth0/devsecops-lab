@@ -1,0 +1,50 @@
+name: DevSecOps Pipeline
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  security:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v3
+
+      - name: Install dependencies
+        run: |
+          cd app
+          npm install
+
+      # 🔴 SAST
+      - name: Run Semgrep
+        run: semgrep --config=auto .
+
+      # 🔴 Secret scanning
+      - name: Run Gitleaks
+        run: gitleaks detect
+
+      # 🔴 SCA (dependency scan)
+      - name: Run Snyk
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        run: |
+          npm install -g snyk
+          snyk test --severity-threshold=low
+
+      # 🔴 BUILD
+      - name: Build Docker image
+        run: docker build -t myapp .
+
+      # 🔴 CONTAINER SCAN
+      - name: Run Trivy
+        run: trivy image myapp
+
+      # 🔴 SBOM
+      - name: Generate SBOM
+        run: syft . -o cyclonedx-json > sbom.json
+
+      # 🔴 IaC
+      - name: Run Checkov
+        run: checkov -d terraform/ || true
