@@ -37,9 +37,6 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y python3-pip
           pip3 install semgrep
-          npm install -g snyk
-
-          # Trivy install (stable)
           curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
 
       # 🟢 SEMGREP
@@ -47,18 +44,27 @@ jobs:
         run: |
           semgrep --config=auto --json > semgrep.json || echo "{}" > semgrep.json
 
-      # 🟢 GITLEAKS (OFFICIAL ACTION ✅)
+      # 🟢 GITLEAKS (ACTION)
       - name: Gitleaks Scan
         uses: gitleaks/gitleaks-action@v2
         with:
           args: detect --report-format json --report-path gitleaks.json
         continue-on-error: true
 
-      # 🟢 SNYK
+      # 🟢 SNYK (ACTION ✅)
       - name: Snyk Scan
+        uses: snyk/actions/node@master
+        env:
+          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
+        with:
+          command: test
+          json: true
+        continue-on-error: true
+
+      # 🟢 CAPTURE SNYK JSON (IMPORTANT FIX 🔥)
+      - name: Save Snyk JSON
         run: |
-          snyk auth ${{ secrets.SNYK_TOKEN }} || true
-          snyk test --json > snyk.json || echo "{}" > snyk.json
+          cp snyk.sarif snyk.json || echo "{}" > snyk.json
 
       # 🟢 SBOM
       - name: Generate SBOM
@@ -121,12 +127,14 @@ jobs:
             report += `| Semgrep | ${r.check_id} | ${sev} | ${r.path} |\n`;
           });
 
-          // SNYK
-          const snyk = safeRead("snyk.json", { vulnerabilities: [] });
-          snyk.vulnerabilities?.forEach(v => {
-            const sev = add(v.severity);
-            report += `| Snyk | ${v.title} | ${sev} | ${v.packageName} |\n`;
-          });
+          // SNYK (SAFE PARSE)
+          const snyk = safeRead("snyk.json", {});
+          if (snyk.vulnerabilities) {
+            snyk.vulnerabilities.forEach(v => {
+              const sev = add(v.severity);
+              report += `| Snyk | ${v.title} | ${sev} | ${v.packageName} |\n`;
+            });
+          }
 
           // GITLEAKS
           const gitleaks = safeRead("gitleaks.json", []);
