@@ -2,11 +2,12 @@ name: DevSecOps Pipeline
 
 on:
   push:
+    paths-ignore:
+      - 'SECURITY_REPORT.md'
   pull_request:
 
-# 🔴 REQUIRED FOR GHCR PUSH
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
@@ -14,88 +15,178 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      # 🔴 CHECKOUT CODE
+      # 🟢 CHECKOUT
       - name: Checkout
         uses: actions/checkout@v4
 
-      # 🔴 SETUP NODE (LATEST)
+      # 🟢 SETUP NODE
       - name: Setup Node
         uses: actions/setup-node@v4
         with:
           node-version: 18
 
-      # 🔴 INSTALL DEPENDENCIES
+      # 🟢 INSTALL DEPENDENCIES
       - name: Install Dependencies
         run: |
           cd app
           npm install
 
-      # 🔴 SAST
+      # 🟢 INSTALL TOOLS (FIXED)
+      - name: Install tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y python3-pip wget
+          pip3 install semgrep
+          npm install -g snyk
+
+          # Trivy
+          curl -sfL https://raw.githubusercontent.com/aquasecurity/trivy/main/contrib/install.sh | sudo sh -s -- -b /usr/local/bin
+
+          # Gitleaks (stable install)
+          wget https://github.com/gitleaks/gitleaks/releases/latest/download/gitleaks-linux-amd64 -O gitleaks
+          chmod +x gitleaks
+          sudo mv gitleaks /usr/local/bin/
+
+      # 🟢 SEMGREP
       - name: Semgrep Scan
-        uses: returntocorp/semgrep-action@v1
-        with:
-          config: auto
-        continue-on-error: true
+        run: |
+          semgrep --config=auto --json > semgrep.json || echo "{}" > semgrep.json
 
-      # 🔴 SECRET SCAN
+      # 🟢 GITLEAKS
       - name: Gitleaks Scan
-        uses: gitleaks/gitleaks-action@v2
-        continue-on-error: true
+        run: |
+          gitleaks detect --report-format json --report-path gitleaks.json || echo "[]" > gitleaks.json
 
-      # 🔴 SCA
+      # 🟢 SNYK
       - name: Snyk Scan
-        uses: snyk/actions/node@master
-        env:
-          SNYK_TOKEN: ${{ secrets.SNYK_TOKEN }}
-        continue-on-error: true
+        run: |
+          snyk auth ${{ secrets.SNYK_TOKEN }} || true
+          snyk test --json > snyk.json || echo "{}" > snyk.json
 
-      # 🔴 SBOM
+      # 🟢 SBOM
       - name: Generate SBOM
         uses: anchore/sbom-action@v0
         with:
           path: .
           format: cyclonedx-json
           output-file: sbom.json
-        continue-on-error: true
 
-      # 🔴 BUILD IMAGE
+      # 🟢 BUILD IMAGE (SAFE)
       - name: Build Docker Image
         run: docker build -t myapp .
 
-      # 🔴 CONTAINER SCAN
+      # 🟢 TRIVY
       - name: Trivy Scan
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref: myapp
-        continue-on-error: true
+        run: |
+          trivy image --format json -o trivy.json myapp || echo "{}" > trivy.json
 
-      # 🔴 LOGIN TO GHCR
+      # 🔥 BEAUTIFICATION (FIXED + ROBUST)
+      - name: Generate Security Report
+        run: |
+          cat << 'EOF' > format-report.js
+          const fs = require("fs");
+
+          function safeRead(file, fallback) {
+            try {
+              const data = fs.readFileSync(file, "utf8");
+              if (!data || data.trim() === "") return fallback;
+              return JSON.parse(data);
+            } catch {
+              return fallback;
+            }
+          }
+
+          function normalize(sev) {
+            if (!sev) return "LOW";
+            sev = sev.toUpperCase();
+            if (sev.includes("CRITICAL")) return "CRITICAL";
+            if (sev.includes("HIGH") || sev.includes("ERROR")) return "HIGH";
+            if (sev.includes("MEDIUM") || sev.includes("WARNING")) return "MEDIUM";
+            return "LOW";
+          }
+
+          let report = "# 🔐 DevSecOps Security Report\n\n";
+          report += "| Tool | Issue | Severity | File |\n";
+          report += "|------|------|----------|------|\n";
+
+          let counts = { CRITICAL: 0, HIGH: 0, MEDIUM: 0, LOW: 0 };
+
+          function add(sev) {
+            sev = normalize(sev);
+            if (counts[sev] !== undefined) counts[sev]++;
+            return sev;
+          }
+
+          // SEMGREP
+          const semgrep = safeRead("semgrep.json", { results: [] });
+          semgrep.results.forEach(r => {
+            const sev = add(r.extra?.severity);
+            report += `| Semgrep | ${r.check_id} | ${sev} | ${r.path} |\n`;
+          });
+
+          // SNYK
+          const snyk = safeRead("snyk.json", { vulnerabilities: [] });
+          snyk.vulnerabilities?.forEach(v => {
+            const sev = add(v.severity);
+            report += `| Snyk | ${v.title} | ${sev} | ${v.packageName} |\n`;
+          });
+
+          // GITLEAKS
+          const gitleaks = safeRead("gitleaks.json", []);
+          (gitleaks.Leaks || gitleaks).forEach(s => {
+            const sev = add("HIGH");
+            report += `| Gitleaks | ${s.Description} | ${sev} | ${s.File} |\n`;
+          });
+
+          // TRIVY
+          const trivy = safeRead("trivy.json", { Results: [] });
+          trivy.Results?.forEach(r => {
+            r.Vulnerabilities?.forEach(v => {
+              const sev = add(v.Severity);
+              report += `| Trivy | ${v.VulnerabilityID} | ${sev} | ${v.PkgName} |\n`;
+            });
+          });
+
+          report += "\n## 🚨 Severity Summary\n\n";
+          report += `- 🔴 CRITICAL: ${counts.CRITICAL}\n`;
+          report += `- 🟠 HIGH: ${counts.HIGH}\n`;
+          report += `- 🟡 MEDIUM: ${counts.MEDIUM}\n`;
+          report += `- 🟢 LOW: ${counts.LOW}\n`;
+
+          fs.writeFileSync("SECURITY_REPORT.md", report);
+          EOF
+
+          node format-report.js
+
+      # 🟢 COMMIT REPORT (SAFE)
+      - name: Commit Report
+        run: |
+          git config user.name "github-actions"
+          git config user.email "github-actions@github.com"
+          git add SECURITY_REPORT.md
+          git commit -m "update security report [skip ci]" || echo "no changes"
+          git push origin HEAD
+
+      # 🟢 LOGIN GHCR
       - name: Login to GHCR
         run: echo "${{ secrets.GITHUB_TOKEN }}" | docker login ghcr.io -u ${{ github.actor }} --password-stdin
 
-      # 🔴 TAG IMAGE
+      # 🟢 TAG IMAGE
       - name: Tag Image
         run: docker tag myapp ghcr.io/${{ github.repository }}/myapp:latest
 
-      # 🔴 PUSH IMAGE
+      # 🟢 PUSH IMAGE
       - name: Push Image
         run: docker push ghcr.io/${{ github.repository }}/myapp:latest
 
-      # 🔴 GENERATE REPORT
-      - name: Generate Report
-        run: |
-          echo "DevSecOps Security Report" > report.txt
-          echo "=========================" >> report.txt
-          echo "SAST, SCA, Secrets, SBOM, Container scan completed." >> report.txt
-
-      # 🔴 UPLOAD REPORT (LATEST VERSION)
+      # 🟢 UPLOAD REPORT
       - name: Upload Report
         uses: actions/upload-artifact@v4
         with:
           name: security-report
-          path: report.txt
+          path: SECURITY_REPORT.md
 
-      # 🔴 UPLOAD SBOM (LATEST VERSION)
+      # 🟢 UPLOAD SBOM
       - name: Upload SBOM
         uses: actions/upload-artifact@v4
         with:
